@@ -35,12 +35,17 @@ team_t team = {
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
+#define DEBUG_MALLOC 0
+#define DEBUG_FREE 0
+#define DEBUG_PLACE 0
+#define DEBUG_INSERT 0
+#define DEBUG_DELETE 0
 
 /* Macros (partially from CS:APP3e) */
 #define WSIZE 4 // single word size in bytes
 #define DSIZE 8 // double word size 
 #define CHUNKSIZE (1<<12) // extend the heap by this many bytes
-#define NUM_SIZE_CLASS 11 // number of size classes
+#define NUM_SIZE_CLASS 17 // number of size classes
 #define MIN_BLOCK_SIZE (4*WSIZE) // header, footer, pred, succ
 
 #define MAX(x, y) ((x) > (y)? (x): (y))
@@ -87,16 +92,28 @@ static void place(void *bp, size_t asize);
 static void insert(void* bp);
 static void delete(void* bp);
 static int get_size_class(size_t asize);
+static int is_list_ptr(void *ptr);
 static void print_block(void *bp);
+static void print_heap();
 static void check_block(void *bp);
 
 
 static void print_block(void *bp) {
-    printf("\t\t\tp: %p; ", bp);
+    printf("\tp: %p; ", bp);
     printf("allocated: %s; ", GET_ALLOC(HDRP(bp))? "yes": "no" );
     printf("hsize: %d; ", GET_SIZE(HDRP(bp)));
     printf("fsize: %d; ", GET_SIZE(FTRP(bp)));
     printf("pred: %p, succ: %p\n", (void *) GET(PRED(bp)), (void *) GET(SUCC(bp)));
+}
+
+static void print_heap() {
+    printf("heap\n");
+    void *bp;
+    for (bp = heap_listp+DSIZE; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+        check_block(bp);
+        print_block(bp);
+    }
+    printf("heap-end\n");
 }
 
 static void check_block(void *bp) {
@@ -157,8 +174,6 @@ int mm_check() {
  */
 int mm_init(void)
 {
-    setbuf(stdout, NULL);
-
     // create initial empty heap, no alignment padding needed
     // array (13 * 4) + prologue (2 * 4) + epilogue (4)
     if ((heap_listp = mem_sbrk(WSIZE*(NUM_SIZE_CLASS + 2 + 1))) == (void *) -1)
@@ -188,6 +203,7 @@ int mm_init(void)
     if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
         return -1;
 
+    // mm_check();
     return 0;
 }
 
@@ -196,6 +212,11 @@ int mm_init(void)
  */
 void *mm_malloc(size_t size)
 {
+    if (DEBUG_MALLOC) {
+        printf("before malloc\n");
+        print_heap();
+    }
+
     size_t asize; // adjusted block size
     size_t extendsize; // the amount to extend the heap by if there's no fit
     char *bp;
@@ -223,6 +244,12 @@ void *mm_malloc(size_t size)
         return NULL;
     place(bp, asize);
 
+    if (DEBUG_MALLOC) {
+        printf("after malloc\n");
+        print_block(bp);
+        print_heap();
+    }
+
     return bp;
 }
 
@@ -231,14 +258,23 @@ void *mm_malloc(size_t size)
  */
 void mm_free(void *bp)
 {
+    if (DEBUG_FREE) {
+        printf("before free %p\n", bp);
+        print_heap();
+    }
+
     size_t size = GET_SIZE(HDRP(bp));
     PUT(HDRP(bp), PACK(size, 0));
     PUT(FTRP(bp), PACK(size, 0));
-    // set pred/succ to 0 before coalescing, because coalesce involves deletion of
-    // blocks from the free list
+    // zero out the pred/succ to be safe
     PUT(PRED(bp), 0);
     PUT(SUCC(bp), 0);
     insert(coalesce(bp));
+
+    if (DEBUG_FREE) {
+        printf("after free %p\n", bp);
+        print_heap();
+    }
 }
 
 /*
@@ -291,6 +327,7 @@ static void *extend_heap(size_t words) {
     // insert the block into the segregated list
     insert(bp);
 
+    // mm_check();
     return bp;
 }
 
@@ -308,6 +345,9 @@ static void *coalesce(void *bp) {
         return bp;
     }
 
+    // coalesce is always called on block that was
+    // just freed, so no need to delete bp from free list
+
     else if (prev_alloc && !next_alloc) {
         // combine with next block
         // first, delete next block from free list
@@ -320,8 +360,8 @@ static void *coalesce(void *bp) {
 
     else if (!prev_alloc && next_alloc) {
         // combine with previous block
-        // first, delete this block from free list
-        delete(bp);
+        // first, delete previous block from free list
+        delete(PREV_BLKP(bp));
         // then, update the size information
         size += GET_SIZE(HDRP(PREV_BLKP(bp)));
         PUT(FTRP(bp), PACK(size, 0));
@@ -331,8 +371,8 @@ static void *coalesce(void *bp) {
 
     else {
         // combine with both previous and next block
-        // first, delete both this and next block from free list
-        delete(bp);
+        // first, delete both previous and next block
+        delete(PREV_BLKP(bp));
         delete(NEXT_BLKP(bp));
         // then, update the size information
         size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
@@ -382,26 +422,33 @@ static void *find_fit(size_t asize) {
  * Place a block of certain size at bp, split if necessary
  */
 static void place(void *bp, size_t asize) {
+    if (DEBUG_PLACE) {
+        printf("place at %p %d bytes\n", bp, asize);
+    }
+
     size_t csize = GET_SIZE(HDRP(bp));
 
     if ((csize - asize) >= MIN_BLOCK_SIZE) {
         // the remainder size is greater than minimum block size
+        // delete block from free list
+        delete(bp);
         // allocate the block
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
-        // delete allocated block from free list
-        delete(bp);
         // create new free block from the remainder
         bp = NEXT_BLKP(bp);
         PUT(HDRP(bp), PACK(csize - asize, 0));
         PUT(FTRP(bp), PACK(csize - asize, 0));
         // insert new block into free list
+        // zero out pred/succ to be safe
+        PUT(PRED(bp), 0);
+        PUT(SUCC(bp), 0);
         insert(bp);
     } else {
         // just allocate the whole block
+        delete(bp);
         PUT(HDRP(bp), PACK(csize, 1));
         PUT(FTRP(bp), PACK(csize, 1));
-        delete(bp);
     }
 }
 
@@ -409,6 +456,13 @@ static void place(void *bp, size_t asize) {
  * insert a free block at bp into the segregated list
  */
 static void insert(void *bp) {
+    if (DEBUG_INSERT) {
+        printf("before insert");
+        print_block(bp);
+        print_heap();
+        check_list();
+    }
+
     size_t size = GET_SIZE(HDRP(bp)); // adjusted size
     int size_class; // the size class (0 - 12)
     char **size_class_ptr; // the pointer to the address of the first free block of the size class
@@ -421,20 +475,28 @@ static void insert(void *bp) {
         // change heap array
         PUT(size_class_ptr, bp_val);
         // set pred/succ of new free block
-        PUT(PRED(bp), 0);
+        PUT(PRED(bp), (unsigned int) size_class_ptr);
         PUT(SUCC(bp), 0);
     }
     // the appropriate size class is not empty
     // insert the free block at the beginning of the size class
     else {
         // set pred/succ of new free block
-        PUT(PRED(bp), 0);
+        PUT(PRED(bp), (unsigned int) size_class_ptr);
         PUT(SUCC(bp), GET(size_class_ptr));
         // connect the previous head of the size class
         PUT(PRED(GET(size_class_ptr)), bp_val);
         // change heap array
         PUT(size_class_ptr, bp_val);
     }
+
+    if (DEBUG_INSERT) {
+        printf("after insert\n");
+        print_block(bp);
+        print_heap();
+        check_list();
+    }
+
 }
 
 
@@ -442,41 +504,54 @@ static void insert(void *bp) {
  * delete a block from free list
  */
 static void delete(void *bp) {
-    int pre = GET(PRED(bp));
-    int suc = GET(SUCC(bp));
-    int size_class = get_size_class(GET_SIZE(HDRP(bp)));
-    unsigned int bp_val = (unsigned int) bp;
+    int pre = !is_list_ptr(PRED_BLKP(bp));
+    int suc = (SUCC_BLKP(bp) != (void *) 0);
 
-    // no predecessor or successor
-    if (pre == 0 && suc == 0) {
-        // check if the block is the lone head of a free list
-        if (GET(freelist_p + size_class) == bp_val)
-            // if it is, set the heap array entry to 0
-            PUT(freelist_p + size_class, 0);
+    if (DEBUG_DELETE) {
+        printf("before delete");
+        print_block(bp);
+        print_heap();
+        check_list();
     }
 
-    // has predecessor but no successor
-    else if (pre != 0 && suc == 0) {
-        // set its predecessor's succ pointer to 0
+    if (GET_ALLOC(HDRP(bp))) {
+        printf("calling delete on an allocated block\n");
+        return;
+    }
+
+    // if bp is the first block of a free list and has successors
+    if (!pre && suc) {
+        PUT(PRED_BLKP(bp), (unsigned int) SUCC_BLKP(bp));
+        PUT(PRED(SUCC_BLKP(bp)), (unsigned int) PRED_BLKP(bp));
+    }
+
+    // if bp is both the first and the last block of a list
+    else if (!pre && !suc) {
+        PUT(PRED_BLKP(bp), (unsigned int) SUCC_BLKP(bp));
+    }
+
+    // if bp is an intermediate block
+    else if (pre && suc) {
+        PUT(SUCC(PRED_BLKP(bp)), (unsigned int) SUCC_BLKP(bp));
+        PUT(PRED(SUCC_BLKP(bp)), (unsigned int) PRED_BLKP(bp));
+    }
+
+    // if bp is the last block
+    else {
         PUT(SUCC(PRED_BLKP(bp)), 0);
     }
 
-    // has both predecessor and successor
-    else if (pre != 0 && suc != 0) {
-        // set its predecessor's succ pointer to its succ
-        PUT(SUCC(PRED_BLKP(bp)), GET(SUCC(bp)));
-        // set its successor's pred pointer to its pred
-        PUT(PRED(SUCC_BLKP(bp)), GET(PRED(bp)));
+    // finally, zero out the pred and succ of bp to be safe
+    PUT(PRED(bp), 0);
+    PUT(SUCC(bp), 0);
+
+    if (DEBUG_DELETE) {
+        printf("after delete");
+        print_block(bp);
+        print_heap();
+        check_list();
     }
 
-    // has no predecessor but has a successor
-    // this means the block is the head of a free list
-    else {
-        // set heap array entry to the address of its succ
-        PUT(freelist_p + size_class, GET(SUCC(bp)));
-        // set its successor's pred pointer to 0
-        PUT(PRED(SUCC_BLKP(bp)), 0);
-    }
 }
 
 /*
@@ -490,4 +565,18 @@ static int get_size_class(size_t asize) {
         asize /= 2;
     }
     return size_class;
+}
+
+static int is_list_ptr(void *ptr) {
+    unsigned int ptr_val = (unsigned int) ptr;
+    unsigned int start = (unsigned int) freelist_p;
+    unsigned int end = start + WSIZE*(NUM_SIZE_CLASS-1);
+
+    // printf("p: %p, end: %p, start: %p", (void *)ptr_val, (void *)end, (void *)start);
+
+    if (ptr_val > end || ptr_val < start)
+        return 0;
+    if ((end - ptr_val) % WSIZE)
+        return 0;
+    return 1;
 }
