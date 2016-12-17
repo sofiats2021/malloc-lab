@@ -1,6 +1,12 @@
 /*
- * Segregated Free List, First-fit strategy
+ * Segregated Free List. First-fit strategy.
+ * There are 17 size classes, and the size classes corresponds to
+ * an array of free lists allocated on the heap. Each array contains
+ * free blocks of sizes within a certain range.
+ * A simple first-fit strategy is used because in segregrated free
+ * lists, it approximates the performance of best fit.
  */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -13,6 +19,7 @@
 /*********************************************************
  * NOTE TO STUDENTS: Before you do anything else, please
  * provide your team information in the following struct.
+ * OK DONE :)
  ********************************************************/
 team_t team = {
     /* Team name */
@@ -98,6 +105,9 @@ static void print_heap();
 static void check_block(void *bp);
 
 
+/*
+ * print info of a block
+ */
 static void print_block(void *bp) {
     printf("\tp: %p; ", bp);
     printf("allocated: %s; ", GET_ALLOC(HDRP(bp))? "yes": "no" );
@@ -106,6 +116,19 @@ static void print_block(void *bp) {
     printf("pred: %p, succ: %p\n", (void *) GET(PRED(bp)), (void *) GET(SUCC(bp)));
 }
 
+/*
+ * check alignment and header/footer consistency of a block
+ */
+static void check_block(void *bp) {
+    if (GET_SIZE(HDRP(bp)) % DSIZE)
+        printf("\terror: not doubly aligned\n");
+    if (GET(HDRP(bp)) != GET(FTRP(bp)))
+        printf("\terror: header & foot do not match\n");
+}
+
+/*
+ * print each block of the heap in ascending address order
+ */
 static void print_heap() {
     printf("heap\n");
     void *bp;
@@ -116,13 +139,9 @@ static void print_heap() {
     printf("heap-end\n");
 }
 
-static void check_block(void *bp) {
-    if (GET_SIZE(HDRP(bp)) % DSIZE)
-        printf("\terror: not doubly aligned\n");
-    if (GET(HDRP(bp)) != GET(FTRP(bp)))
-        printf("\terror: header & foot do not match\n");
-}
-
+/*
+ * print info of the segregated free list maintained on the heap
+ */
 static void check_list() {
     void *size_class_ptr, *bp;
     printf("\tSegregated Free List Info:\n");
@@ -152,11 +171,8 @@ int mm_check() {
     if (GET_SIZE(HDRP(heap_listp)) != DSIZE || !GET_ALLOC(HDRP(heap_listp)))
         printf("\terror: bad prologue header\n");
 
-    printf("\tprinting every block in the heap: \n");
-    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
-        check_block(bp);
-        print_block(bp);
-    }
+    // check the heap
+    print_heap();
 
     // check epilogue
     if (GET_SIZE(HDRP(bp)) != 0 || !(GET_ALLOC(HDRP(bp))))
@@ -185,8 +201,8 @@ int mm_init(void)
     // size here means adjusted size.
     // minimum size of a size class is 16 bytes
 
-    /* there are 11 size classes
-     * [1-2^4], [2^4+1 - 2^5] ... [2^12+1, 2^13], [2^13+1 - +inf]
+    /* there are 17 size classes
+     * [1-2^4], [2^4+1 - 2^5] ... [2^18+1, 2^19], [2^19+1 - +inf]
      */
 
     memset(heap_listp, 0, NUM_SIZE_CLASS*WSIZE);
@@ -278,7 +294,8 @@ void mm_free(void *bp)
 }
 
 /*
- * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
+ * mm_realloc - only free and malloc when necessary
+ * coalescing strategy is used when expanding the block size
  */
 void *mm_realloc(void *bp, size_t size)
 {
@@ -446,7 +463,7 @@ static void *coalesce(void *bp) {
  * find first free block that fit the size of request
  */
 static void *find_fit(size_t asize) {
-    int size_class = get_size_class(asize);
+    int size_class = get_size_class(asize);    
     void *class_p, *bp;
     size_t blk_size;
 
@@ -521,7 +538,6 @@ static void insert(void *bp) {
     }
 
     size_t size = GET_SIZE(HDRP(bp)); // adjusted size
-    int size_class; // the size class (0 - 12)
     char **size_class_ptr; // the pointer to the address of the first free block of the size class
     unsigned int bp_val = (unsigned int) bp;
 
@@ -617,13 +633,22 @@ static void delete(void *bp) {
  */
 static int get_size_class(size_t asize) {
     int size_class = 0;
+    int remainder_sum = 0;
     while (asize > MIN_BLOCK_SIZE && size_class < NUM_SIZE_CLASS-1) {
         size_class++;
+        remainder_sum += asize % 2;
         asize /= 2;
+    }
+    if (size_class < NUM_SIZE_CLASS-1 && remainder_sum > 0 && asize == MIN_BLOCK_SIZE) {
+        size_class++;
     }
     return size_class;
 }
 
+/*
+ * check whether a pointer points to a free list head
+ * allocated on the heap
+ */
 static int is_list_ptr(void *ptr) {
     unsigned int ptr_val = (unsigned int) ptr;
     unsigned int start = (unsigned int) freelist_p;
